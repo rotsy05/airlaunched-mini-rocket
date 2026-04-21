@@ -1,0 +1,227 @@
+# ============================================================
+# Air-Launched Mini Rocket — Onboard Avionics
+# SIERA ESTACA · Dassault UAV Challenge
+# MicroPython on ESP32
+# ============================================================
+
+import machine, bmp280, time
+import _thread
+from machine import Pin, I2C, Timer
+from micropython import const, schedule
+from collections import deque
+from sx1262 import SX1262
+
+
+# ── LoRa radio (SX1262) ─────────────────────────────────────
+# SPI bus wiring: clk=9, mosi=10, miso=11, cs=8
+# Frequency 869.5 MHz — EU ISM band, SF8/CR8 for reliability
+LAUNCH_TOKEN = "Q"  # Authorization token — change before each campaign
+
+sf, cr = 8, 8
+sx = SX1262(spi_bus=1, clk=9, mosi=10, miso=11, cs=8, irq=14, rst=12, gpio=13)
+sx.begin(freq=869.5, bw=125.0, sf=sf, cr=cr, syncWord=0x12,
+         power=22, currentLimit=140.0, preambleLength=8,
+         implicit=False, implicitLen=0xFF,
+         crcOn=True, txIq=False, rxIq=False,
+         tcxoVoltage=1.8, useRegulatorLDO=False, blocking=True)
+
+
+# ── Ignition circuit (MOSFET) ────────────────────────────────
+mosfet = Pin(6, Pin.OUT)
+mosfet.off()  # Ensure igniter is off at startup
+
+
+# ── Parachute servo (PWM) ────────────────────────────────────
+SERVO_OPEN   = const(800_000)   # Duty cycle in ns — parachute released
+SERVO_CLOSED = const(1_850_000) # Duty cycle in ns — parachute locked
+
+servo = machine.PWM(Pin(7))
+servo.freq(50)
+servo.duty_ns(SERVO_CLOSED)
+
+
+# ── Flight parameters ────────────────────────────────────────
+ALTITUDE_THRESHOLD = const(15)    # Launch detection threshold in m
+SPEED_THRESHOLD    = const(3)     # Apogee detection: vertical speed in m/s
+MIN_DEPLOY_DELAY   = const(1000)  # Minimum ms after launch before deploy allowed
+MAX_DEPLOY_DELAY   = const(10000) # Backup timer: forced deploy after this delay
+MAX_ALT            = const(300)   # Safety ceiling: forced deploy above this altitude in m
+TIMEOUT            = const(10_000)# Post-touchdown logging duration in ms
+
+
+# ── Flight state machine ─────────────────────────────────────
+STATUS_STANDBY   = const(0)
+STATUS_LAUNCHED  = const(1)
+STATUS_DEPLOYED  = const(2)
+STATUS_TOUCHDOWN = const(3)
+
+status = STATUS_STANDBY
+
+ticks_launched  = 0
+ticks_deployed  = 0
+ticks_touchdown = 0
+
+
+# ── Log frame types ──────────────────────────────────────────
+# Format: timestamp | frame_type | data...
+FRAME_LOG   = const(0)  # Event strings (LAUNCHED, DEPLOYED, TOUCHDOWN...)
+FRAME_BMP   = const(1)  # Barometric data: altitude, pressure, temperature
+FRAME_SPEED = const(2)  # Computed vertical speed
+
+
+# ── Data buffers ─────────────────────────────────────────────
+# log_buffer feeds the logging thread; measure_buffer caches pre-launch data
+log_buffer     = deque((), 100)
+measure_buffer = deque((), 80)
+log_buffer.append(f"{time.ticks_ms()}|{FRAME_LOG}|START")
+
+
+# ── BMP280 barometric sensor (I2C) ───────────────────────────
+# sda=Pin(4), scl=Pin(5) — HANDHELD_DYN: 13ms sample period, IIR filter x16
+bmp = bmp280.BMP280(I2C(0, sda=Pin(4), scl=Pin(5)), use_case=bmp280.BMP280_CASE_HANDHELD_DYN)
+BMP_REFRESH_PERIOD = const(13)  # Minimum ms between reads
+
+bmp_last_measure_ticks = 0
+sea_level_pressure     = 0
+
+
+# ── Logging thread ───────────────────────────────────────────
+def flush_logs(buffer):
+    """Runs in a separate thread — drains log_buffer to DATA.txt continuously."""
+    f = open("DATA.txt", "a")
+    last_flush = 0
+
+    while True:
+        if time.ticks_ms() - last_flush > 1000:  # Hard flush to storage every second
+            f.flush()
+            last_flush = time.ticks_ms()
+
+        try:
+            line = buffer.popleft()
+        except IndexError:
+            time.sleep(0.01)
+            continue
+
+        if type(line) == str:
+            if not line.endswith("\n"): line += "\n"
+            f.write(line)
+        elif type(line) == tuple:
+            f.write("|".join([str(v) for v in line]) + "\n")
+
+
+# ── BMP280 read with rate limiting ───────────────────────────
+def get_bmp_data():
+    """Reads pressure & temperature, enforces minimum poll period, returns altitude."""
+    global bmp_last_measure_ticks, sea_level_pressure
+
+    # Wait until sensor is ready for next measurement
+    time.sleep_ms(max(0, 1 + BMP_REFRESH_PERIOD - (time.ticks_ms() - bmp_last_measure_ticks)))
+
+    while True:
+        bmp_last_measure_ticks = time.ticks_ms()
+        try:
+            pressure, temperature = bmp.pressure, bmp.temperature
+        except OSError:
+            time.sleep_ms(BMP_REFRESH_PERIOD)
+            continue
+
+        if pressure > 71300:  # Filter first-read glitch (anomalously low pressure)
+            break
+        time.sleep_ms(BMP_REFRESH_PERIOD)
+
+    if sea_level_pressure == 0:
+        sea_level_pressure = pressure  # Calibrate reference pressure at ground level
+
+    # Standard atmosphere barometric formula: invert P = P0*(1 - h/44330)^(1/0.1903)
+    altitude = 44330 * (1.0 - pow(pressure / sea_level_pressure, 0.1903))
+    return bmp_last_measure_ticks, altitude, pressure, temperature
+
+
+# ── Parachute deployment ─────────────────────────────────────
+def deploy():
+    """Actuates servo to open parachute if minimum post-launch delay has elapsed."""
+    global ticks_deployed, status
+    if time.ticks_ms() - ticks_launched > MIN_DEPLOY_DELAY and status != STATUS_DEPLOYED:
+        servo.duty_ns(SERVO_OPEN)
+        status = STATUS_DEPLOYED
+        ticks_deployed = time.ticks_ms()
+        schedule(log_buffer.append, f"{ticks_deployed}|{FRAME_LOG}|DEPLOYED\n")
+    else:
+        schedule(log_buffer.append, f"{time.ticks_ms()}|{FRAME_LOG}|INVALID DEPLOY ORDER")
+
+def deploy_callback(t):
+    """Timer callback — backup deployment if apogee detection did not trigger."""
+    deploy()
+    schedule(log_buffer.append, f"{time.ticks_ms()}|{FRAME_LOG}|DEPLOYED BY TIMER")
+
+
+# ── Vertical speed computation ───────────────────────────────
+def avg_speed(altitude_buffer):
+    """Computes average vertical speed (m/s) over a rolling altitude buffer."""
+    speeds = [
+        (altitude_buffer[i+1][1] - altitude_buffer[i][1]) /
+        ((altitude_buffer[i+1][0] - altitude_buffer[i][0]) / 1000)
+        for i in range(len(altitude_buffer) - 1)
+    ]
+    return sum(speeds) / len(speeds)
+
+
+# ════════════════════════════════════════════════════════════
+# MAIN FLIGHT SEQUENCE
+# ════════════════════════════════════════════════════════════
+
+# ── Phase 1: STANDBY — wait for launch authorization ─────────
+while True:
+    received = sx.recv()[0].decode()
+    if received == LAUNCH_TOKEN:
+        break
+
+# ── Phase 2: IGNITION ────────────────────────────────────────
+mosfet.on()
+time.sleep(1)
+mosfet.off()
+
+status = STATUS_LAUNCHED
+log_buffer.append(f"{time.ticks_ms()}|{FRAME_LOG}|LAUNCHED")
+ticks_launched = time.ticks_ms()
+
+# Start logging thread and backup deployment timer
+_thread.start_new_thread(flush_logs, (log_buffer,))
+timer = Timer(period=MAX_DEPLOY_DELAY, mode=Timer.ONE_SHOT, callback=deploy_callback)
+
+altitude_buffer = []
+
+
+# ── Phase 3: LAUNCHED — apogee detection ─────────────────────
+while status == STATUS_LAUNCHED:
+    timestamp, altitude, pressure, temperature = get_bmp_data()
+    altitude_buffer.append((timestamp, altitude))
+
+    if len(altitude_buffer) > 15:  # Keep rolling window of 15 samples (~195ms)
+        altitude_buffer.pop(0)
+
+    log_buffer.append((timestamp, FRAME_BMP, altitude, pressure, temperature))
+
+    # Safety: force deploy if altitude ceiling exceeded
+    if altitude > MAX_ALT:
+        deploy()
+        log_buffer.append(f"{timestamp}|{FRAME_LOG}|FORCED DEPLOYMENT ALT")
+
+    # Primary: deploy when vertical speed drops below threshold (apogee)
+    if len(altitude_buffer) > 2:
+        speed = avg_speed(altitude_buffer)
+        log_buffer.append(f"{timestamp}|{FRAME_SPEED}|{speed}")
+        if speed < SPEED_THRESHOLD:
+            deploy()
+            log_buffer.append(f"{timestamp}|{FRAME_LOG}|DEPLOYED BY SPEED")
+
+
+# ── Phase 4: DEPLOYED & TOUCHDOWN — descent monitoring ───────
+while status == STATUS_DEPLOYED or time.ticks_ms() - ticks_touchdown < TIMEOUT:
+    timestamp, altitude, pressure, temperature = get_bmp_data()
+    log_buffer.append((timestamp, FRAME_BMP, altitude, pressure, temperature))
+
+    if status == STATUS_DEPLOYED and altitude < ALTITUDE_THRESHOLD:
+        status = STATUS_TOUCHDOWN
+        ticks_touchdown = time.ticks_ms()
+        log_buffer.append(f"{timestamp}|{FRAME_LOG}|TOUCHDOWN")
