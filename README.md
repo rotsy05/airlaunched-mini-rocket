@@ -132,7 +132,7 @@ Custom PCB design, soldering, and full system wiring under strict size and mass 
 
 | Hardware build | Launch | Flight data |
 |---|---|---|
-| ![PCB](assets/asset1.jpg) | ![Launch](assets/asset2.jpg) | ![Data](assets/asset3.png) |
+| ![PCB](assets/asset1.JPG) | ![Launch](assets/asset2.png) | ![Data](assets/asset3.png) |
 
 ## Credits
 
