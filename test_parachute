@@ -1,0 +1,37 @@
+# ============================================================
+# test_parachute.py — Parachute Servo Test
+# SIERA ESTACA · Dassault UAV Challenge
+#
+# Cycles the servo between closed (locked) and open (released)
+# positions. Use this script to verify servo travel and
+# mechanical parachute release before flight integration.
+# ============================================================
+
+import machine, time
+from machine import Pin
+from micropython import const
+
+# ── Servo PWM duty cycles (in nanoseconds) ───────────────────
+SERVO_OPEN   = const(800_000)   # Released position
+SERVO_CLOSED = const(1_850_000) # Locked position
+
+# ── Servo init on PWM pin ────────────────────────────────────
+servo = machine.PWM(Pin(6))
+servo.freq(50)  # Standard servo frequency: 50 Hz
+servo.duty_ns(SERVO_CLOSED)
+
+print("Servo test starting...")
+print("Closed (locked)")
+time.sleep(2)
+
+# ── Open: parachute release ──────────────────────────────────
+print("Open (released)")
+servo.duty_ns(SERVO_OPEN)
+time.sleep(2)
+
+# ── Back to closed ───────────────────────────────────────────
+print("Closed (locked)")
+servo.duty_ns(SERVO_CLOSED)
+time.sleep(1)
+
+print("Done.")
