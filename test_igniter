@@ -1,0 +1,29 @@
+# ============================================================
+# test_igniter.py — Ignition Circuit Test
+# SIERA ESTACA · Dassault UAV Challenge
+#
+# Fires the MOSFET-controlled igniter after a 5-second
+# countdown. Run this script to verify the ignition circuit
+# before integration. Keep the igniter disconnected during
+# bench testing.
+# ============================================================
+
+from machine import Pin
+import time
+
+# ── Igniter output pin (MOSFET gate) ────────────────────────
+igniter = Pin(2, Pin.OUT)
+igniter.off()  # Ensure circuit is open at startup
+
+# ── Safety countdown ─────────────────────────────────────────
+print("Igniter test — firing in:")
+for i in range(5, 0, -1):
+    print(f"  {i}...")
+    time.sleep(1)
+
+# ── Fire ─────────────────────────────────────────────────────
+print("FIRE")
+igniter.on()
+time.sleep(1)
+igniter.off()
+print("Done.")
