@@ -128,6 +128,11 @@ Custom PCB design, soldering, and full system wiring under strict size and mass 
 *Launched from ground ramp — air-launch from UAV was the intended final configuration.*
 
 ---
+## Media
+
+| Hardware build | Launch | Flight data |
+|---|---|---|
+| ![PCB](assets/asset1.jpg) | ![Launch](assets/asset2.jpg) | ![Data](assets/asset3.png) |
 
 ## Credits
 
