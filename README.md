@@ -16,7 +16,7 @@ The rocket was successfully tested via ground-based launch ramp with nominal fli
 
 **Team structure:**
 - 2 members — mechanical design & 3D printing
-- 2 members — electronics & embedded software *(hardware + software)*
+- 2 members (including myself) — electronics & embedded software *(hardware + software)*
 
 ---
 
