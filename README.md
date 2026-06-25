@@ -107,11 +107,9 @@ Custom PCB design, soldering, and full system wiring under strict size and mass 
 
 ```
 ├── main.py            # Primary flight software (ESP32 + LoRa launch)
-├── main_1.py          # Alternative version (RPi Pico, button-triggered)
 ├── bmp280.py          # BMP280 I2C driver (David Stenwall)
-├── testAllumeur.py    # Igniter circuit test
-├── test_missile.py    # Full system integration test
-└── Servo.py           # Parachute servo test
+├── test_igniter.py    # Igniter circuit test
+└── test_parachute.py           # Parachute servo test
 ```
 
 ---
